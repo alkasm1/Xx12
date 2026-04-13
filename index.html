@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>ALM GeoFreq v6</title>
+
+<!-- مكتبات -->
+<script src="https://unpkg.com/mammoth/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://unpkg.com/docx@7.7.0/build/index.js"></script>
+
+<style>
+body { font-family: "Cairo"; margin:0; }
+header { background:#0BA37F; color:white; padding:15px; text-align:center; }
+.container { padding:20px; max-width:900px; margin:auto; }
+button, input { width:100%; padding:12px; margin-top:10px; }
+canvas { margin-top:20px; }
+#outputText { margin-top:15px; border:1px solid #ccc; padding:10px; min-height:100px; }
+</style>
+</head>
+
+<body>
+
+<header>ALM GeoFreq v6 — File → Image → File</header>
+
+<div class="container">
+
+<input id="userKey" value="123456789">
+
+<h3>اختيار ملف Word أو PDF</h3>
+<input type="file" id="docInput" accept=".docx,.pdf">
+
+<button onclick="encode()">تحويل إلى صورة</button>
+
+<canvas id="canvas"></canvas>
+<button onclick="saveImage()">💾 حفظ الصورة</button>
+
+<hr>
+
+<input type="file" id="imageInput" accept="image/png">
+<button onclick="decode()">استعادة النص</button>
+
+<div id="outputText"></div>
+
+</div>
+
+<script>
+// ================= SETTINGS =================
+const B=32, LMAX=12, SIZE=1024, HEADER=16;
+
+// ================= CHAR TABLE =================
+const indexToChar={
+1:"ا",2:"ب",3:"ت",4:"ث",5:"ج",6:"ح",7:"خ",8:"د",9:"ذ",
+10:"ر",11:"ز",12:"س",13:"ش",14:"ص",15:"ض",16:"ط",
+17:"ظ",18:"ع",19:"غ",20:"ف",21:"ق",22:"ك",23:"ل",
+24:"م",25:"ن",26:"ه",27:"و",28:"ي"
+};
+
+const charToIndex={};
+for(let k in indexToChar) charToIndex[indexToChar[k]]=Number(k);
+
+// ================= TEXT CLEAN =================
+function normalizeArabic(s){
+return s.replace(/[إأآ]/g,"ا")
+.replace(/ى/g,"ي")
+.replace(/ؤ/g,"و")
+.replace(/ئ/g,"ي")
+.replace(/ة/g,"ه");
+}
+
+function cleanText(t){
+return t.split("").filter(c=>charToIndex[c]||c===" ")
+.join("").replace(/\s+/g," ").trim();
+}
+
+// ================= EXTRACT FILE =================
+async function extractText(file){
+const name=file.name.toLowerCase();
+
+// WORD
+if(name.endsWith(".docx")){
+const buf=await file.arrayBuffer();
+const res=await mammoth.extractRawText({arrayBuffer:buf});
+return res.value;
+}
+
+// PDF
+if(name.endsWith(".pdf")){
+const buf=await file.arrayBuffer();
+const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+
+let text="";
+for(let i=1;i<=pdf.numPages;i++){
+const page=await pdf.getPage(i);
+const content=await page.getTextContent();
+text+=content.items.map(it=>it.str).join(" ")+"\n";
+}
+return text;
+}
+
+alert("نوع غير مدعوم");
+return "";
+}
+
+// ================= ENCODE =================
+async function encode(){
+
+const file=document.getElementById("docInput").files[0];
+if(!file) return alert("اختر ملف");
+
+let text=await extractText(file);
+text=normalizeArabic(text);
+text=cleanText(text);
+
+const key=BigInt(document.getElementById("userKey").value||0);
+
+const words=text.split(" ");
+const blocks=[];
+
+words.forEach(w=>{
+for(let i=0;i<w.length;i+=LMAX){
+blocks.push(w.slice(i,i+LMAX));
+}
+});
+
+const canvas=document.getElementById("canvas");
+canvas.width=SIZE;
+canvas.height=SIZE;
+const ctx=canvas.getContext("2d");
+
+ctx.fillStyle="white";
+ctx.fillRect(0,0,SIZE,SIZE);
+
+// store count
+let count=BigInt(blocks.length);
+for(let i=0;i<8;i++){
+const v=Number((count>>BigInt(8*i))&0xFFn);
+draw(ctx,i,255-v);
+}
+
+// data
+blocks.forEach((b,bi)=>{
+let C=wordToCode(b)^key;
+
+for(let j=0;j<8;j++){
+const byte=Number((C>>BigInt(8*j))&0xFFn);
+draw(ctx,HEADER+bi*8+j,255-byte);
+}
+});
+
+alert("تم التشفير");
+}
+
+// ================= DECODE =================
+function decode(){
+
+const file=document.getElementById("imageInput").files[0];
+if(!file) return;
+
+const key=BigInt(document.getElementById("userKey").value||0);
+
+const img=new Image();
+img.onload=()=>{
+const canvas=document.getElementById("canvas");
+const ctx=canvas.getContext("2d");
+
+canvas.width=img.width;
+canvas.height=img.height;
+ctx.drawImage(img,0,0);
+
+const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
+
+// read count
+let count=0n;
+for(let i=0;i<8;i++){
+const v=255-data[i*4];
+count|=(BigInt(v)<<BigInt(8*i));
+}
+
+const blocks=[];
+for(let bi=0;bi<Number(count);bi++){
+let C=0n;
+
+for(let j=0;j<8;j++){
+const p=HEADER+bi*8+j;
+const v=255-data[p*4];
+C|=(BigInt(v)<<BigInt(8*j));
+}
+
+const word=codeToWord(C^key);
+if(word) blocks.push(word);
+}
+
+const text=blocks.join(" ");
+document.getElementById("outputText").innerText=text;
+
+// export
+if(confirm("حفظ كملف Word؟")){
+exportWord(text);
+}else{
+exportPDF(text);
+}
+};
+
+img.src=URL.createObjectURL(file);
+}
+
+// ================= HELPERS =================
+function wordToCode(w){
+const c=new Array(LMAX).fill(0);
+let p=0;
+for(let i=w.length-1;i>=0;i--){
+const idx=charToIndex[w[i]];
+if(idx===undefined) continue;
+c[p++]=idx;
+if(p>=LMAX) break;
+}
+let C=0n;
+for(let i=0;i<LMAX;i++){
+C+=BigInt(c[i])*(BigInt(B)**BigInt(i));
+}
+return C;
+}
+
+function codeToWord(C){
+let out="";
+for(let i=0;i<LMAX;i++){
+const d=Number(C%BigInt(B));
+C/=BigInt(B);
+if(d) out=indexToChar[d]+out;
+}
+return out;
+}
+
+function draw(ctx,p,g){
+const x=p%SIZE;
+const y=Math.floor(p/SIZE);
+const img=ctx.createImageData(1,1);
+img.data[0]=g;
+img.data[1]=g;
+img.data[2]=g;
+img.data[3]=255;
+ctx.putImageData(img,x,y);
+}
+
+function saveImage(){
+const canvas=document.getElementById("canvas");
+const a=document.createElement("a");
+a.href=canvas.toDataURL("image/png");
+a.download="encoded.png";
+a.click();
+}
+
+// ================= EXPORT =================
+async function exportWord(text){
+const {Document,Packer,Paragraph}=window.docx;
+
+const doc=new Document({
+sections:[{children:[new Paragraph(text)]}]
+});
+
+const blob=await Packer.toBlob(doc);
+download(blob,"decoded.docx");
+}
+
+function exportPDF(text){
+const {jsPDF}=window.jspdf;
+const doc=new jsPDF();
+const lines=doc.splitTextToSize(text,180);
+doc.text(lines,10,10);
+doc.save("decoded.pdf");
+}
+
+function download(blob,name){
+const a=document.createElement("a");
+a.href=URL.createObjectURL(blob);
+a.download=name;
+a.click();
+}
+</script>
+
+</body>
+</html>
